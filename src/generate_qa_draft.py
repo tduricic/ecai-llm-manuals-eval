@@ -55,17 +55,17 @@ logging.basicConfig(level=logging.INFO, format='%(levelname)s:%(lineno)d: %(mess
 try:
     import yaml
     SCRIPT_DIR = Path(__file__).resolve().parent
-    CONFIG_PATH = SCRIPT_DIR.parent / "config" / "settings.yaml"
+    CONFIG_PATH = SCRIPT_DIR.parent / "config" / "settings_generate.yaml"
     logging.info(f"Loading configuration from: {CONFIG_PATH}")
     with open(CONFIG_PATH, 'r') as f:
         config = yaml.safe_load(f)
     logging.info("Configuration loaded successfully.")
 except FileNotFoundError:
     logging.error(f"Configuration file not found at calculated path: {CONFIG_PATH}")
-    logging.error("Ensure 'config/settings.yaml' exists relative to the script's parent directory.")
+    logging.error("Ensure 'config/settings_generate.yaml' exists relative to the script's parent directory.")
     sys.exit(1)
 except ImportError:
-     logging.error("PyYAML not found. Please install it (`pip install pyyaml`) to load config/settings.yaml.")
+     logging.error("PyYAML not found. Please install it (`pip install pyyaml`) to load config/settings_generate.yaml.")
      sys.exit(1)
 except yaml.YAMLError as e:
      logging.error(f"Error parsing configuration file {CONFIG_PATH}: {e}")
@@ -1066,7 +1066,7 @@ if __name__ == "__main__":
     # --- Determine File Paths ---
     input_file_path = Path(args.input_jsonl)
     if not input_file_path.is_file(): logging.error(f"Input file not found: {input_file_path}"); sys.exit(1)
-    output_base_path = input_file_path.parent / input_file_path.stem
+    output_base_path = input_file_path.parent / input_file_path.stem.replace("_pages", "")
     try: output_base_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e: logging.error(f"Could not create output dir: {e}"); sys.exit(1)
 

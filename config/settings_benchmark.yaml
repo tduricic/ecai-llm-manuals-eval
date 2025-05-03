@@ -1,0 +1,29 @@
+# Configuration for Phase 2 Benchmarking (run_benchmark_manual.py)
+
+# Models to test: key -> {provider: str, api_id: str, context_window: int}
+# Ensure these IDs/windows are correct and accessible
+models_to_test:
+  gpt-4o-mini:  { provider: openai, api_id: gpt-4o-mini,          context_window: 128000 }
+  gemini-1.5p:  { provider: google, api_id: models/gemini-1.5-pro-latest, context_window: 1000000 }
+  llama3-70b:   { provider: groq,   api_id: llama3-70b-8192,      context_window: 8192 }
+  mixtral-large:  { provider: groq,   api_id: mixtral-8x7b-32768,   context_window: 32768 }
+
+# Embedding models
+dense_retriever_embedder: "BAAI/bge-large-en-v1.5"
+semantic_similarity_embedder: "sentence-transformers/all-MiniLM-L6-v2"
+
+# Retrieval parameters
+retrieval_params:
+  bm25_k: 10         # Initial candidates from BM25
+  dense_k: 10        # Initial candidates from Dense
+  hybrid_k: 10       # Final candidates after MMR
+  mmr_lambda: 0.5    # MMR diversity (0.5 = balanced)
+
+# Scoring parameters
+scoring_params:
+  sem_em_threshold: 0.90  # Threshold for semantic match (single_label QA)
+  page_acc_tolerance: 1   # Allow page +/- 1 tolerance
+
+# API parameters
+api_params:
+  api_delay_seconds: 0.2  # Basic delay between LLM calls in benchmark run

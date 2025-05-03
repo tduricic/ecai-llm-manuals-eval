@@ -1,11 +1,29 @@
+# Data Processing and Utilities
 pandas
+numpy
+tqdm
+
+# Machine Learning
+scikit-learn
 sentence-transformers
+
+# LLM and API Clients
 google-generativeai
 google-api-core
 openai
+groq
 python-dotenv
+
+# Retrieval Libraries
+pyserini
+faiss-cpu
+
+# Evaluation Metrics and Datasets
 datasets
 ragas
-scikit-learn
+
+# PDF Processing
 pymupdf4llm
+
+# Configuration
 PyYAML

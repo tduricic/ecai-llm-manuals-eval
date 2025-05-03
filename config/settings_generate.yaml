@@ -1,4 +1,12 @@
+# Configuration for PDF processing script
+paths:
+  # Directory containing source PDF files
+  pdf_directory: "data/pdfs/"
+  # Base directory for processed output
+  processed_data_dir: "data/processed/"
+
 # Configuration for generate_qa_draft.py
+
 pipeline:
   overgen_factor: 4
   dup_threshold: 0.90

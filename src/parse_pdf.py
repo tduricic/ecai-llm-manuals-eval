@@ -1,11 +1,11 @@
 import pymupdf4llm
-import sys # To handle command-line arguments
+import sys  # To handle command-line arguments
 import yaml
 from dotenv import load_dotenv
 import logging
 import json
 import re
-from pathlib import Path # Using pathlib for easier path manipulation
+from pathlib import Path  # Using pathlib for easier path manipulation
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -16,13 +16,13 @@ load_dotenv()
 # --- Load configuration ---
 try:
     # Use Path object for config path
-    config_path = Path('config/settings.yaml')
+    config_path = Path('config/settings_generate.yaml')
     with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
     logging.info("Configuration loaded successfully.")
 except FileNotFoundError:
     logging.error(f"Error: {config_path} not found.")
-    sys.exit(1) # Use sys.exit for clearer exit
+    sys.exit(1)  # Use sys.exit for clearer exit
 except Exception as e:
     logging.error(f"Error loading configuration: {e}")
     sys.exit(1)
@@ -30,9 +30,7 @@ except Exception as e:
 # --- Get paths from config ---
 # Use Path objects for directories
 PDF_DIR = Path(config['paths']['pdf_directory'])
-MARKDOWN_PAGE_OUTPUT_DIR = Path(config['paths']['processed_data_dir']) / 'markdown_pages'
-# Create output directory if it doesn't exist
-MARKDOWN_PAGE_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+PROCESSED_DATA_DIR = Path(config['paths']['processed_data_dir'])
 
 
 def get_language_from_filename(filename: str) -> str:
@@ -46,27 +44,36 @@ def get_language_from_filename(filename: str) -> str:
         logging.warning(f"Could not determine language for {Path(filename).name}, defaulting to 'en'.")
         return "en"
 
+
 # --- Modified function to process ONE PDF ---
-def process_single_pdf(pdf_path: Path, output_dir: Path):
+def process_single_pdf(pdf_path: Path, base_output_dir: Path):
     """
     Processes a single PDF, converting each page to Markdown and saving
-    structured data to a specific JSONL file named after the PDF.
+    structured data to a specific JSONL file in a directory named after the PDF.
     """
     if not pdf_path.is_file():
         logging.error(f"Input PDF not found: {pdf_path}")
-        return False # Indicate failure
+        return False  # Indicate failure
 
     filename = pdf_path.name
+    stem = pdf_path.stem  # Get filename without extension
+
+    # Create a directory for this specific PDF
+    pdf_specific_dir = base_output_dir / stem
+    pdf_specific_dir.mkdir(parents=True, exist_ok=True)
+
+    # Output file will be inside the PDF-specific directory
+    output_filename = pdf_specific_dir / f"{stem}_pages.jsonl"
+
     language = get_language_from_filename(filename)
-    output_filename = output_dir / f"{pdf_path.stem}_pages.jsonl" # e.g., manual_A_pages.jsonl
     total_pages_saved = 0
-    first_dict_keys_logged = False # Flag per file now
+    first_dict_keys_logged = False
 
     logging.info(f"Processing: {filename} (Language: {language})")
 
     try:
         # Expecting a list of dictionaries from page_chunks=True
-        markdown_pages_list = pymupdf4llm.to_markdown(str(pdf_path), page_chunks=True) # Pass path as string
+        markdown_pages_list = pymupdf4llm.to_markdown(str(pdf_path), page_chunks=True)
         num_md_pages = len(markdown_pages_list)
         logging.info(f"Converted {filename} to Markdown, received {num_md_pages} page chunks (dictionaries).")
 
@@ -77,11 +84,11 @@ def process_single_pdf(pdf_path: Path, output_dir: Path):
                         logging.info(f"Keys in first page dictionary: {list(page_dict.keys())}")
                         first_dict_keys_logged = True
 
-                    page_md = page_dict.get('text', '') # Use the correct key 'text'
+                    page_md = page_dict.get('text', '')
 
                     if isinstance(page_md, str) and page_md.strip():
                         page_data = {
-                            "doc_id": filename, # Store the original filename
+                            "doc_id": filename,
                             "language": language,
                             "page_num": page_num_zero_based + 1,
                             "markdown_content": page_md.strip()
@@ -89,19 +96,21 @@ def process_single_pdf(pdf_path: Path, output_dir: Path):
                         outfile.write(json.dumps(page_data, ensure_ascii=False) + '\n')
                         total_pages_saved += 1
                     elif not isinstance(page_md, str):
-                         logging.warning(f"Value for key 'text' on page {page_num_zero_based+1} is not a string: type={type(page_md)}")
+                        logging.warning(
+                            f"Value for key 'text' on page {page_num_zero_based + 1} is not a string: type={type(page_md)}")
 
                 else:
-                     logging.warning(f"Item at index {page_num_zero_based} for {filename} is not a dictionary: type={type(page_dict)}")
+                    logging.warning(
+                        f"Item at index {page_num_zero_based} for {filename} is not a dictionary: type={type(page_dict)}")
 
         logging.info(f"Successfully processed {num_md_pages} pages.")
         logging.info(f"Total pages with content saved: {total_pages_saved}.")
         logging.info(f"Structured page data saved to: {output_filename}")
-        return True # Indicate success
+        return True  # Indicate success
 
     except Exception as e:
         logging.error(f"Error processing {filename}: {e}", exc_info=True)
-        return False # Indicate failure
+        return False  # Indicate failure
 
 
 # --- Main execution block modified ---
@@ -113,17 +122,18 @@ if __name__ == "__main__":
         sys.exit(1)
 
     pdf_filename_arg = sys.argv[1]
-    pdf_full_path = PDF_DIR / pdf_filename_arg # Construct full path using pathlib
+    pdf_full_path = PDF_DIR / pdf_filename_arg  # Construct full path using pathlib
 
     logging.info(f"Starting PDF processing for single file: {pdf_full_path}")
 
-    # Process the specified PDF
-    success = process_single_pdf(pdf_full_path, MARKDOWN_PAGE_OUTPUT_DIR)
+    # Process the specified PDF with the base processed data directory
+    success = process_single_pdf(pdf_full_path, PROCESSED_DATA_DIR)
 
     if success:
         logging.info("PDF processing finished successfully.")
-        # Optional: Print first few lines of the created file
-        output_jsonl = MARKDOWN_PAGE_OUTPUT_DIR / f"{pdf_full_path.stem}_pages.jsonl"
+        # Update path for verification
+        stem = pdf_full_path.stem
+        output_jsonl = PROCESSED_DATA_DIR / stem / f"{stem}_pages.jsonl"
         try:
             with open(output_jsonl, 'r', encoding='utf-8') as f:
                 print(f"\n--- First 3 lines of output file ({output_jsonl.name}) ---")
@@ -131,7 +141,7 @@ if __name__ == "__main__":
                     if i >= 3: break
                     print(line.strip()[:200] + "...")
         except FileNotFoundError:
-             logging.warning(f"Could not read output file {output_jsonl} for verification.")
+            logging.warning(f"Could not read output file {output_jsonl} for verification.")
     else:
         logging.error("PDF processing failed.")
-        sys.exit(1) # Exit with error status if processing failed
+        sys.exit(1)  # Exit with error status if processing failed
