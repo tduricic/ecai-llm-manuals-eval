@@ -172,3 +172,32 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Environment variables
+.env
+
+# Configuration files (if they contain secrets)
+# config/secrets.yaml
+
+# Data files (if large or confidential)
+data/pdfs/*
+data/processed/*
+# Add specific large files if needed
+
+# Model files (if downloaded locally)
+models/*
+
+# IDE specific files (add as needed)
+.idea/
+.vscode/
+
+# Python specific files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+venv/
+env/

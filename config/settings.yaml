@@ -1,0 +1,46 @@
+# Configuration for generate_qa_draft.py
+pipeline:
+  overgen_factor: 4
+  dup_threshold: 0.90
+  ragas_threshold: 0.80
+  judge_threshold: 4
+  final_dataset_size: 35 # Target number of rows in the final dataset
+
+models:
+  embed: "sentence-transformers/all-MiniLM-L6-v2"
+  generation: "gemini-2.5-pro-exp-03-25"
+  # generation: "gemini-2.5-flash-preview-04-17"
+  step_parsing: "gemini-2.5-flash-preview-04-17"
+  judge: "gpt-4.1"
+
+files:
+  # Path relative to the main project directory (where config/ and src/ reside)
+  master_prompt: "master_prompt.txt"
+  # Suffixes for generated files (relative to input file location)
+  raw_output_suffix: "_raw_output.txt"
+  candidate_suffix: "_candidates.pkl"
+  stats_suffix: "_stats.json"
+  audit_suffix_a: "_audit_A.csv"
+  audit_suffix_b: "_audit_B.csv"
+  gold_dataset_suffix: "_gold.csv"
+
+quotas:
+  # Target number of questions per category in the final dataset
+  category_targets:
+    Specification Lookup: 5
+    Tool/Material Identification: 5
+    Procedural Step Inquiry: 5
+    Location/Definition: 5
+    Conditional Logic/Causal Reasoning: 5
+    Safety Information Lookup: 5
+    Unanswerable: 5
+
+audit:
+  audit_fraction: 0.30 # Fraction of final dataset to sample for audit
+  kappa_min: 0.61 # Minimum acceptable Cohen's Kappa (Substantial Agreement)
+  sentinel_accuracy_threshold: 0.80 # Min accuracy rater needs on sentinel Qs
+
+api_params:
+  judge_delay_seconds: 0.5   # Delay between OpenAI Judge/Verifier calls
+  max_parse_retries: 5       # Max retries for step parsing LLM call on failure/rate limit
+  retry_delay_seconds: 60    # Wait time (sec) on API rate limit errors

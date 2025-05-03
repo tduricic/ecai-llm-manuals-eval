@@ -1,0 +1,11 @@
+pandas
+sentence-transformers
+google-generativeai
+google-api-core
+openai
+python-dotenv
+datasets
+ragas
+scikit-learn
+pymupdf4llm
+PyYAML

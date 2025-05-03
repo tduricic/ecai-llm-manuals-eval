@@ -1,0 +1,102 @@
+###############################################################################
+# 1 OBJECTIVE
+Generate a diverse, high‑quality set of **35** Question–Answer (Q‑A) pairs
+based *only* on the provided JSON Lines (JSONL) representation of ONE
+technical instruction manual (page by page).
+
+**CRITICAL OUTPUT REQUIREMENT:** Your response *must* contain ONLY the raw CSV data as specified below. Do NOT include any introduction, explanation, header row, or concluding remarks. Start directly with the first character of the first row (`"`) and end directly with the last character of the last row (`"` followed by a newline).
+
+###############################################################################
+# 2 CONTEXT FOR THE MODEL
+You are a meticulous technical writer creating challenging comprehension
+questions for an NLP evaluation dataset.
+Each JSON line is a page of the manual; all content is in the key
+`markdown_content`. Questions must be strictly grounded in this text.
+
+###############################################################################
+# 3 INPUT FORMAT (JSONL)
+Each line contains:
+  • `doc_id`    (str)   : filename of the source PDF
+  • `language` (str)   : e.g. "en"
+  • `page_num` (int)   : page number within the PDF
+  • `markdown_content` (str): Markdown extracted from that page (May contain minor formatting artifacts).
+
+###############################################################################
+# 4 OUTPUT FORMAT — ***RAW CSV ONLY, COMMA DELIMITED***
+Return exactly **35** CSV rows (no header row).
+Use a comma (`,`) as the delimiter between fields.
+**Wrap every cell in double quotes ("") and double any internal quotes (`""`)**.
+
+COLUMN ORDER (9 columns)
+
+"question_id","persona","doc_id","language","question_text",
+"category","gt_answer_snippet","gt_page_number","_self_grounded"
+
+• `question_id`     : `<DOCPREFIX>_Q##` (01 – 35). Derive `<DOCPREFIX>` from the `doc_id` by removing the file extension (e.g., 'heat_pump_dryer'). Strive for sequential numbering.
+• `persona`       : one of {**Novice User, Technician, SafetyOfficer**}
+• `doc_id`          : **Copy the consistent `doc_id` value associated with the input manual.**
+• `language`        : **Copy the consistent `language` value associated with the input manual.**
+• `question_text`   : phrased in the chosen persona’s voice
+• `category`        : exactly one label from Section **6**
+• `gt_answer_snippet` : **Character-for-character verbatim copy** from `markdown_content`. Minimal span (≤ 250 chars) that fully answers the question. **For 'Procedural Step Inquiry', the snippet should contain the sequence of steps and may include newlines (`\n`) if steps are listed vertically in the source.** **Do NOT paraphrase or summarise.** ("Not Answered" for Unanswerable items)
+• `gt_page_number` : page_num of the snippet, or "None" for Unanswerable
+• `_self_grounded` : **"True"** if the question is answerable and the snippet is directly extracted, **"False"** if the question is 'Unanswerable'.
+
+###############################################################################
+# 5 PERSONA STYLE HINTS  (ONE‑LINE EACH)
+Novice User → simple wording, asks basic “what/where” questions
+Technician → uses precise technical jargon, asks detailed procedural/spec questions
+SafetyOfficer → asks about/emphasises risks, warnings, and protective measures
+
+###############################################################################
+# 6 Q‑A CATEGORIES  (+ exact counts you MUST hit)
+# Definitions are expanded for clarity. Assign the single best-fitting category.
+| Count | Category                          | Definition                                                              |
+|-------|-----------------------------------------|-------------------------------------------------------------------------|
+| **5** | Specification Lookup                    | Asks for specific quantitative or qualitative properties, technical data, capacities, dimensions, ratings, error codes, model numbers, or standards mentioned in the text. Example questions: "What is the weight?", "What voltage does it use?", "What does error E-01 mean?". |
+| **5** | Tool/Material Identification            | Asks to identify required tools (e.g., screwdriver type), parts (e.g., filter model), materials (e.g., lubricant type), consumables (e.g., replacement cartridge), software, or specific chemical agents needed for a task or mentioned in the text. |                           |
+| **5** | **Procedural Step Inquiry** | Asks how to perform a task involving multiple steps. **Focus on finding procedures with at least 3 distinct steps, as these are strongly preferred for evaluating task guidance.** Also strongly prefer procedures that are explicitly numbered (e.g., '1.', '2.', '3.') in the source text. The answer snippet should contain these verbatim steps. |
+| **5** | Location/Definition                     | Asks *where* a physical component, control, or interface is located (e.g., "Where is the power button?") OR *what* a specific term, symbol, indicator light, display message, or menu option *means* or *does* (e.g., "What does the 'Eco' light indicate?", "Define 'plinth filter'"). |
+| **5** | Conditional Logic/Causal Reasoning    | Asks about situations dependent on specific conditions ('What if...?', 'When should I...?'), prerequisites for an action, or the cause/effect relationship ('Why did...?', 'What happens if...?'). Often involves troubleshooting or understanding operational logic. |
+| **5** | Safety Information Lookup               | Asks about potential hazards, safety precautions, specific warnings ('Caution:', 'Warning:'), required Personal Protective Equipment (PPE), specific risks associated with operation/maintenance, emergency procedures, or safe disposal instructions. |
+| **5** | Unanswerable                            | Asks a plausible question related to the device, its operation, or maintenance, but the answer cannot be reasonably inferred or found anywhere within the provided manual text. |
+
+(Total rows = **35**. **Strict adherence to these counts is crucial.**)
+###############################################################################
+# 7 GENERATION GUIDELINES
+• **Strict grounding:** Except Unanswerable, every answer *must* be directly extractable, character-for-character, from `markdown_content`.
+• **Interpret Noisy Input:** If `markdown_content` contains minor formatting issues or apparent OCR errors, interpret the intended meaning for question generation, but extract answer snippets *only* from the text as provided.
+• **Procedural Preference:** When generating 'Procedural Step Inquiry' rows, actively search for multi-step procedures. **Make a significant effort to select procedures containing 3 or more distinct steps.** Prioritize those that use standard numerical enumeration (e.g., 1., 2., 3.) and extract them including the numbering. If no such numbered procedures are found for a relevant question, extract the steps as available using the source's formatting.
+• **Page Coverage:** Spread questions across as many pages as possible.
+• **Snippet Minimality:** Choose the *shortest* contiguous span that fully answers. For procedures, this includes the full sequence of core steps for the specific sub-task identified.
+• **Persona Balance:** Distribute the personas (`Novice User`, `Technician`, `SafetyOfficer`) thoughtfully. Aim for a reasonable balance, avoiding significant overuse of one persona.
+• **Question Diversity:** Avoid generating semantically very similar questions, even if they fit the category/persona.
+• **Self-Correction Check:** Before outputting, mentally review your generated rows. Ensure each has exactly 9 columns, follows the CSV quoting rules, and that values align with definitions (e.g., category labels, snippet rules, `_self_grounded` logic).
+• **Token Budget:** Keep total output < 4000 tokens (estimate).
+
+###############################################################################
+# 8 EXAMPLE ROWS  (not part of output)
+# Example: Specification
+"heat_pump_dryer_Q01","Technician","heat_pump_dryer.pdf","en",
+"What is the maximum load capacity for the Cottons programme?",
+"Specification Lookup","9 kg","10","True"
+
+# Example: Procedural Step Inquiry (showing preference for numbered lists & >=3 steps)
+"heat_pump_dryer_Q04","Novice User","heat_pump_dryer.pdf","en",
+"How do I clean the fluff filters?",
+"Procedural Step Inquiry","1. Open the door.\n2. Pull the two fluff filters out.\n3. Remove the fluff from the filter surfaces.","40","True"
+# (Note: Extract verbatim including '1.', '2.' if they are present in the source)
+
+# Example: Unanswerable
+"heat_pump_dryer_Q12", "SafetyOfficer", "heat_pump_dryer.pdf", "en",
+"Can I use this dryer if the mains voltage is only 110V?",
+"Unanswerable", "Not Answered", "None", "False"
+
+
+###############################################################################
+# 9 INPUT MANUAL DATA (JSONL)
+<PASTE ALL JSONL LINES FOR THIS MANUAL HERE>
+###############################################################################
+
+### **CRITICAL REMINDER:** OUTPUT ONLY the 35 raw CSV rows NOW. ###
+### NO extra text, headers, explanations, or formatting. ###
