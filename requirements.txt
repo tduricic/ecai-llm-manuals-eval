@@ -17,6 +17,9 @@ python-dotenv
 # Retrieval Libraries
 pyserini
 faiss-cpu
+langchain-text-splitters
+transformers
+tiktoken
 
 # Evaluation Metrics and Datasets
 datasets

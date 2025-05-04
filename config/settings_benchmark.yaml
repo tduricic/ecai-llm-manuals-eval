@@ -8,6 +8,10 @@ models_to_test:
   llama3-70b:   { provider: groq,   api_id: llama3-70b-8192,      context_window: 8192 }
   mixtral-large:  { provider: groq,   api_id: mixtral-8x7b-32768,   context_window: 32768 }
 
+# NEW: Define retrievers and prompts to test
+retrievers_to_test: ["none", "bm25", "hybrid"]
+prompts_to_test: ["zero_shot", "few_shot", "few_shot_cot"]
+
 # Embedding models
 dense_retriever_embedder: "BAAI/bge-large-en-v1.5"
 semantic_similarity_embedder: "sentence-transformers/all-MiniLM-L6-v2"
@@ -27,3 +31,7 @@ scoring_params:
 # API parameters
 api_params:
   api_delay_seconds: 0.2  # Basic delay between LLM calls in benchmark run
+
+files:
+  # Path relative to the main project directory
+  system_prompt: "system_instructions.md"
