@@ -12,6 +12,7 @@ google-generativeai
 google-api-core
 openai
 groq
+ollama
 python-dotenv
 
 # Retrieval Libraries

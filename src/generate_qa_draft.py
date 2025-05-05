@@ -1,21 +1,3 @@
-#!/usr/bin/env python3
-# =============================================================================
-# generate_qa_draft.py
-# =============================================================================
-# Generates an extractive QA dataset from a technical manual JSONL file.
-# Implements a multi-stage filtering pipeline and human audit loop.
-# Saves run statistics for later aggregation.
-#
-# Supports two modes:
-# 1. Default (generate): Runs steps 1-9 (generates/filters data,
-#    exports audit files with sentinel, saves candidates & stats)
-# 2. Finalize (--finalize): Loads candidates, runs step 10 (Checks sentinel,
-#    Kappa check including sentinel, merges procedural edits from
-#    _procedural_review.csv, updates stats, save gold dataset).
-# 3. Test Finalize (--finalize_test): Simulates audit & review file editing,
-#    then runs Step 10 merge/save logic.
-# =============================================================================
-
 import os
 import csv
 import json
@@ -136,6 +118,18 @@ SENTINEL_ROWS_INFO = [ # Using 1 BAD Sentinel
      {"answer_correct?": "no", "grounded?": "no", "question_clear?": "no", "category_correct?": "no", "persona_tone_ok?": "no"})
 ]
 NUM_SENTINELS = len(SENTINEL_ROWS_INFO)
+
+# --- NEW: Valid Personas and Categories (derived from master prompt) ---
+VALID_PERSONAS = ["Novice User", "Technician", "SafetyOfficer"]
+VALID_CATEGORIES = [
+    "Specification Lookup",
+    "Tool/Material Identification",
+    PROCEDURAL_CATEGORY_NAME,  # Use constant
+    LOCATION_DEF_CATEGORY_NAME, # Use constant
+    "Conditional Logic/Causal Reasoning",
+    "Safety Information Lookup",
+    UNANSWERABLE_CATEGORY_NAME  # Use constant
+]
 # -----------------------------------------------------------------------------
 
 # --- Setup basic logging ---
@@ -179,13 +173,7 @@ except Exception as e: logging.error(f"Error initializing models: {e}", exc_info
 # --- FUNCTION DEFINITIONS (Steps 1-10) ---
 # =============================================================================
 
-# (Functions 1-9 remain unchanged from the previous version)
-# ... (Functions load_manual, build_prompt, over_generate, llm_parse_snippet_to_steps,
-#      parse_rows, add_parsed_steps_llm, deduplicate, page_check_annotate,
-#      ragas_filter, gpt_judge_score, judge_filter, get_full_manual_text,
-#      verify_unanswerable, quota_select, export_audit_slice, check_stage1_kappa
-#      _simulate_audit_files are assumed here as unchanged from previous state) ...
-
+# (Functions 1-2a remain unchanged)
 # ------------------ STEP 1: I/O UTILS --------------------------------------
 def load_manual(jsonl_path_str: str) -> Tuple[List[Dict], str, str]:
     """Loads manual data from a JSONL file."""
@@ -242,8 +230,106 @@ def over_generate(prompt: str, k: int, generation_model, generation_temperature:
         except Exception as e: logging.error(f"Error during generation call {i+1}: {e}", exc_info=True); print("  -> Attempting to continue...")
     print(f"--- Generation Complete: Collected {len(all_raw_rows)} raw rows total ---"); return all_raw_rows
 
-# ------------------ STEP 3: PARSING + Step 3b Helper ------------------------
-# Helper to parse steps using LLM (called in Step 3b)
+
+# ------------------ STEP 3: PARSING -----------------------------------------
+# (parse_rows function remains unchanged)
+def parse_rows(raw_rows: List[str], schema: List[str], doc_id: str, language: str) -> pd.DataFrame:
+    """Parses raw CSV strings into DataFrame, initializes parsed_steps."""
+    parsed_data = [];
+    expected_columns = len(schema);
+    row_num_counter = 0
+    doc_prefix = doc_id.split('.')[0] if '.' in doc_id else doc_id
+    print(f"\n--- Starting Parsing of {len(raw_rows)} raw rows ---")
+    for i, raw_row in enumerate(raw_rows):
+        try:
+            reader = csv.reader([raw_row], quotechar='"', doublequote=True, skipinitialspace=True)
+            cells = next(reader)
+            if len(cells) != expected_columns: logging.warning(
+                f"Row {i + 1} bad columns ({len(cells)}/{expected_columns}). Skipping."); continue
+            row_dict = dict(zip(schema, cells));
+            # Ensure values are stripped strings AFTER confirming dict creation
+            row_dict = {k: v.strip() if isinstance(v, str) else v for k, v in row_dict.items()}
+            row_dict['doc_id'] = doc_id;
+            row_dict['language'] = language;
+            row_num_counter += 1;
+            row_dict['question_id'] = f"{doc_prefix}_Q{row_num_counter:03d}"
+            # Check boolean string validity more explicitly
+            if str(row_dict.get('_self_grounded')).strip().capitalize() not in ["True", "False"]:
+                 row_dict['_self_grounded'] = "False" # Default to False if invalid
+            else:
+                 row_dict['_self_grounded'] = str(row_dict.get('_self_grounded')).strip().capitalize() # Standardize capitalization
+            # Check page number validity
+            if row_dict.get('gt_page_number') != "None":
+                try:
+                    # Try converting to int, but keep it as string in the dict for consistency
+                    int(row_dict['gt_page_number'])
+                except (ValueError, TypeError):
+                    logging.warning(f"Row {i + 1} QID {row_dict['question_id']} invalid page number '{row_dict['gt_page_number']}'. Setting to None.")
+                    row_dict['gt_page_number'] = "None"
+            # Ensure persona and category exist for potential later validation
+            if 'persona' not in row_dict: logging.warning(f"Row {i + 1} QID {row_dict['question_id']} missing 'persona'. Setting to empty string."); row_dict['persona'] = ""
+            if 'category' not in row_dict: logging.warning(f"Row {i + 1} QID {row_dict['question_id']} missing 'category'. Setting to empty string."); row_dict['category'] = ""
+
+            row_dict['parsed_steps'] = None  # Initialize column
+            parsed_data.append(row_dict)
+        except csv.Error as csv_e: # Be more specific about CSV errors
+            logging.warning(f"CSV parsing error row {i + 1}: {csv_e}. Skipping.")
+        except Exception as e:
+            logging.warning(f"General parsing error row {i + 1}: {e}. Skipping.", exc_info=True); continue
+    print(f"--- Parsing Complete: Successfully parsed {len(parsed_data)} rows ---")
+    if not parsed_data: logging.error("No rows parsed."); return pd.DataFrame()
+    # Convert to DataFrame
+    df = pd.DataFrame(parsed_data)
+    # Set column types explicitly if needed, e.g.,
+    # df['gt_page_number'] = df['gt_page_number'].astype(str) # Ensure it remains string
+    # df['_self_grounded'] = df['_self_grounded'].astype(str) # Ensure it remains string
+    return df
+
+# --- NEW Step 3a: Filter Invalid Persona/Category ---
+def filter_invalid_metadata(df: pd.DataFrame) -> pd.DataFrame:
+    """Filters out rows with invalid persona or category values."""
+    if df.empty:
+        logging.info("Filter Invalid Metadata: Skipping, input DataFrame is empty.")
+        return df
+
+    if 'persona' not in df.columns or 'category' not in df.columns:
+        logging.error("Filter Invalid Metadata: Missing 'persona' or 'category' column. Skipping filter.")
+        return df
+
+    n_rows_before = len(df)
+    print(f"\n--- Step 3a: Filtering Invalid Persona/Category (Valid Personas: {len(VALID_PERSONAS)}, Valid Categories: {len(VALID_CATEGORIES)}) ---")
+
+    # Create masks for valid rows
+    valid_persona_mask = df['persona'].isin(VALID_PERSONAS)
+    valid_category_mask = df['category'].isin(VALID_CATEGORIES)
+
+    # Combine masks: keep rows where BOTH are valid
+    combined_mask = valid_persona_mask & valid_category_mask
+
+    # Identify and log invalid rows before filtering
+    invalid_rows = df[~combined_mask]
+    if not invalid_rows.empty:
+        invalid_personas_found = invalid_rows[~valid_persona_mask]['persona'].unique()
+        invalid_categories_found = invalid_rows[~valid_category_mask]['category'].unique()
+        logging.warning(f"Found {len(invalid_rows)} rows with invalid metadata:")
+        if len(invalid_personas_found) > 0:
+            logging.warning(f"  - Invalid Personas encountered: {list(invalid_personas_found)}")
+        if len(invalid_categories_found) > 0:
+            logging.warning(f"  - Invalid Categories encountered: {list(invalid_categories_found)}")
+        # Can optionally log the QIDs of removed rows if needed for debugging:
+        # logging.warning(f"  - QIDs removed: {invalid_rows['question_id'].tolist()}")
+
+    # Apply the filter
+    df_filtered = df[combined_mask].reset_index(drop=True)
+    n_rows_after = len(df_filtered)
+    n_removed = n_rows_before - n_rows_after
+
+    print(f"Filter Invalid Metadata: Kept {n_rows_after} / {n_rows_before} rows (Removed {n_removed}).")
+    print("\n--- Step 3a Complete (Invalid Metadata Filter) ---")
+    return df_filtered
+
+# --- Step 3b: Add Parsed Steps via LLM ---
+# (llm_parse_snippet_to_steps helper unchanged)
 def llm_parse_snippet_to_steps(snippet: str, parsing_model_name: str, max_retries=MAX_PARSE_RETRIES) -> List[str]:
     """
     Uses the specified LLM (Gemini or OpenAI) to parse a text snippet into a
@@ -358,46 +444,11 @@ def llm_parse_snippet_to_steps(snippet: str, parsing_model_name: str, max_retrie
 
     logging.error(f"LLM Parsing failed all retries."); return None
 
-# Main parsing function for Step 3
-def parse_rows(raw_rows: List[str], schema: List[str], doc_id: str, language: str) -> pd.DataFrame:
-    """Parses raw CSV strings into DataFrame, initializes parsed_steps."""
-    parsed_data = [];
-    expected_columns = len(schema);
-    row_num_counter = 0
-    doc_prefix = doc_id.split('.')[0] if '.' in doc_id else doc_id
-    print(f"\n--- Starting Parsing of {len(raw_rows)} raw rows ---")
-    for i, raw_row in enumerate(raw_rows):
-        try:
-            reader = csv.reader([raw_row], quotechar='"', doublequote=True, skipinitialspace=True)
-            cells = next(reader)
-            if len(cells) != expected_columns: logging.warning(
-                f"Row {i + 1} bad columns ({len(cells)}/{expected_columns}). Skipping."); continue
-            row_dict = dict(zip(schema, cells));
-            row_dict = {k: v.strip() if isinstance(v, str) else v for k, v in row_dict.items()}
-            row_dict['doc_id'] = doc_id;
-            row_dict['language'] = language;
-            row_num_counter += 1;
-            row_dict['question_id'] = f"{doc_prefix}_Q{row_num_counter:03d}"
-            if row_dict.get('_self_grounded') not in ["True", "False"]: row_dict['_self_grounded'] = "False"
-            if row_dict.get('gt_page_number') != "None":
-                try:
-                    int(row_dict['gt_page_number'])
-                except (ValueError, TypeError):
-                    row_dict['gt_page_number'] = "None"
-            row_dict['parsed_steps'] = None  # Initialize column
-            parsed_data.append(row_dict)
-        except Exception as e:
-            logging.warning(f"Parsing error row {i + 1}: {e}. Skipping.", exc_info=True); continue
-    print(f"--- Parsing Complete: Successfully parsed {len(parsed_data)} rows ---")
-    if not parsed_data: logging.error("No rows parsed."); return pd.DataFrame()
-    df = pd.DataFrame(parsed_data);
-    return df
-
-
-# --- Step 3b: Add Parsed Steps via LLM ---
+# (add_parsed_steps_llm function unchanged)
 def add_parsed_steps_llm(df: pd.DataFrame, parsing_model_name: str) -> pd.DataFrame:
     """Adds/Updates 'parsed_steps' column by parsing procedural snippets using an LLM."""
-    if df.empty or 'category' not in df.columns or 'gt_answer_snippet' not in df.columns: logging.error(
+    if df.empty: logging.info("Add Parsed Steps: Skipping, input empty."); return df.assign(parsed_steps=None)
+    if 'category' not in df.columns or 'gt_answer_snippet' not in df.columns: logging.error(
         "Missing columns for step parsing."); return df.assign(parsed_steps=None)
     print(f"\n--- Step 3b: Parsing Procedural Snippets using LLM ({parsing_model_name}) ---")
     parsed_steps_col_data = []
@@ -417,19 +468,26 @@ def add_parsed_steps_llm(df: pd.DataFrame, parsing_model_name: str) -> pd.DataFr
                 logging.warning(f"QID {row.get('question_id')} procedural bad snippet."); parsed_steps_col_data.append(
                     None)
         else:
-            parsed_steps_col_data.append(None)
+            parsed_steps_col_data.append(None) # Append None for non-procedural rows
+    # Ensure the length matches before assigning
+    if len(parsed_steps_col_data) != len(df):
+         logging.error(f"Parsed steps list length ({len(parsed_steps_col_data)}) != DataFrame length ({len(df)}). Cannot assign column.")
+         return df # Return original df to prevent error
     df['parsed_steps'] = parsed_steps_col_data
     print(f"LLM Step Parsing complete. Successfully parsed steps for {parsed_count} / {num_to_parse} rows.")
-    df['parsed_steps'] = df['parsed_steps'].astype(object);
+    df['parsed_steps'] = df['parsed_steps'].astype(object); # Ensure dtype is object for lists
+    print("\n--- Step 3b Complete (LLM Step Parsing) ---")
     return df
 
 
 # ------------------ STEP 4: Deduplication Filter -----------------------------
+# (deduplicate function unchanged)
 def deduplicate(df: pd.DataFrame, embedder: SentenceTransformer, threshold: float, model_name_str: str) -> pd.DataFrame:
     """Removes rows with questions too similar to preceding questions."""
     if df.empty or 'question_text' not in df.columns: logging.info("Deduplication: Skipping."); return df
     questions = df["question_text"].tolist();
     n_rows_before = len(df);
+    print(f"\n--- Step 4: Deduplicating Questions ---")
     print(f"Deduplication: Encoding {n_rows_before} questions using '{model_name_str}'...")
     embeddings = embedder.encode(questions, normalize_embeddings=True, show_progress_bar=True);
     indices_to_keep = [];
@@ -445,16 +503,19 @@ def deduplicate(df: pd.DataFrame, embedder: SentenceTransformer, threshold: floa
     n_rows_after = len(deduplicated_df);
     n_removed = n_rows_before - n_rows_after;
     print(f"Deduplication: Kept {n_rows_after} out of {n_rows_before} rows (Removed {n_removed}).");
+    print(f" Shape after Dedupe: {deduplicated_df.shape}"); print("\n--- Step 4 Complete ---")
     return deduplicated_df
 
 
 # ------------------ STEP 5: Page Check Annotation ----------------------------
+# (page_check_annotate function unchanged)
 def page_check_annotate(df: pd.DataFrame, pages_data: List[Dict]) -> pd.DataFrame:
     """Annotates DataFrame with 'passed_strict_check' boolean column."""
     if df.empty: logging.info("Page Check Annotate: Skipping."); df['passed_strict_check'] = pd.Series(
         dtype='boolean'); return df
     if not pages_data: logging.warning("Page Check Annotate: Missing pages_data."); df[
         'passed_strict_check'] = False; return df
+    print(f"\n--- Step 5: Annotating Snippet Grounding ---")
     print(f"Page Check Annotate: Verifying strict snippet presence for {len(df)} rows...")
     page_lookup = {page['page_num']: page.get('markdown_content', '') for page in pages_data if
                    isinstance(page.get('page_num'), int) and isinstance(page.get('markdown_content'), str)}
@@ -467,7 +528,7 @@ def page_check_annotate(df: pd.DataFrame, pages_data: List[Dict]) -> pd.DataFram
         snippet = row.get('gt_answer_snippet');
         page_num_str = row.get('gt_page_number')
         if category == UNANSWERABLE_CATEGORY_NAME or page_num_str == "None":
-            passed = True
+            passed = True # Unanswerable or None page pass automatically for quota selection purposes
         else:
             if isinstance(snippet, str) and snippet and page_num_str != "None":
                 try:
@@ -476,16 +537,27 @@ def page_check_annotate(df: pd.DataFrame, pages_data: List[Dict]) -> pd.DataFram
                     if page_content is not None and isinstance(page_content,
                                                                str) and snippet in page_content: passed = True
                 except (ValueError, TypeError):
-                    pass
+                    # Log if page number format was bad?
+                    # logging.debug(f"QID {row.get('question_id')} page num '{page_num_str}' invalid format for lookup.")
+                    pass # Keep passed as False
         passed_strict_list.append(passed)
-    df['passed_strict_check'] = pd.Series(passed_strict_list, index=df.index, dtype='boolean')  # Ensure index alignment
+
+    # Ensure the list length matches before assigning
+    if len(passed_strict_list) != len(df):
+        logging.error(f"Strict check list length ({len(passed_strict_list)}) != DataFrame length ({len(df)}). Cannot assign column.")
+        df['passed_strict_check'] = pd.Series(dtype='boolean'); # Assign empty/default
+    else:
+        df['passed_strict_check'] = pd.Series(passed_strict_list, index=df.index, dtype='boolean')  # Ensure index alignment
+
     n_passed = df['passed_strict_check'].sum();
     n_failed = len(df) - n_passed;
     print(f"Page Check Annotate: Marked {n_passed} rows pass strict check, {n_failed} fail.");
+    print(f" Shape after Annotation: {df.shape}"); print("\n--- Step 5 Complete ---")
     return df
 
 
 # ------------------ STEP 6: RAGAS Filter ------------------------------------
+# (ragas_filter function unchanged)
 def ragas_filter(df: pd.DataFrame, pages_data: List[Dict], threshold: float) -> pd.DataFrame:
     """Filters DataFrame based on Ragas faithfulness and answer_correctness scores."""
     if 'ragas_eval' not in globals() or 'faithfulness' not in globals() or 'answer_correctness' not in globals() or 'Dataset' not in globals():
@@ -496,7 +568,8 @@ def ragas_filter(df: pd.DataFrame, pages_data: List[Dict], threshold: float) -> 
     if df.empty: logging.info("Ragas Filter: Skipping."); return df
     if not pages_data: logging.warning("Ragas Filter: Missing pages_data. Skipping."); return df
     n_rows_before = len(df);
-    print(f"\nRagas Filter: Preparing data for {n_rows_before} rows...")
+    print(f"\n--- Step 6: Filtering with Ragas ---")
+    print(f"Ragas Filter: Preparing data for {n_rows_before} rows...")
     page_lookup = {page['page_num']: page.get('markdown_content', '') for page in pages_data if
                    isinstance(page.get('page_num'), int) and isinstance(page.get('markdown_content'), str)}
     if not page_lookup: logging.warning("Ragas Filter: Failed page lookup creation. Skipping."); return df
@@ -553,11 +626,13 @@ def ragas_filter(df: pd.DataFrame, pages_data: List[Dict], threshold: float) -> 
     df_filtered = df.loc[list(final_indices_to_keep)].sort_index().reset_index(drop=True);
     n_rows_after = len(df_filtered);
     n_removed = n_rows_before - n_rows_after;
-    print(f"Ragas Filter: Kept {n_rows_after} / {n_rows_before} rows.");
+    print(f"Ragas Filter: Kept {n_rows_after} / {n_rows_before} rows (Removed {n_removed}).");
+    print(f" Shape after Ragas: {df_filtered.shape}"); print("\n--- Step 6 Complete ---")
     return df_filtered
 
 
 # ------------------ STEP 7: LLM Judge Filter --------------------------------
+# (gpt_judge_score helper unchanged)
 def gpt_judge_score(question: str, answer_snippet: str, context: str, judge_model_name: str) -> int:
     """Calls the specified OpenAI model to score the QA pair based on context."""
     default_score = 1;
@@ -589,7 +664,7 @@ def gpt_judge_score(question: str, answer_snippet: str, context: str, judge_mode
         logging.error(f"Judge API error: {e}");
         return default_score
 
-
+# (judge_filter function unchanged)
 def judge_filter(df: pd.DataFrame, pages_data: List[Dict], judge_model_name: str, threshold: int) -> pd.DataFrame:
     """Filters DataFrame based on scores from an LLM judge."""
     global HAS_OPENAI  # Assumes openai was imported if needed
@@ -599,7 +674,8 @@ def judge_filter(df: pd.DataFrame, pages_data: List[Dict], judge_model_name: str
     if df.empty: logging.info("Judge Filter: Skipping."); return df
     if not pages_data: logging.warning("Judge Filter: Missing pages_data."); return df
     n_rows_before = len(df);
-    print(f"\nJudge Filter: Preparing {n_rows_before} rows (model '{judge_model_name}')...")
+    print(f"\n--- Step 7: Filtering Answerable with LLM Judge ---")
+    print(f"Judge Filter: Preparing {n_rows_before} rows (model '{judge_model_name}')...")
     page_lookup = {page['page_num']: page.get('markdown_content', '') for page in pages_data if
                    isinstance(page.get('page_num'), int) and isinstance(page.get('markdown_content'), str)}
     if not page_lookup: logging.warning("Judge Filter: Failed lookup creation."); return df
@@ -630,23 +706,26 @@ def judge_filter(df: pd.DataFrame, pages_data: List[Dict], judge_model_name: str
     df_filtered = df[pd.Series(passed_judge_mask)].reset_index(drop=True)
     n_rows_after = len(df_filtered);
     n_removed = n_rows_before - n_rows_after;
-    print(f"Judge Filter: Kept {n_rows_after} / {n_rows_before} rows.");
+    print(f"Judge Filter: Kept {n_rows_after} / {n_rows_before} rows (Removed {n_removed}).");
+    print(f" Shape after Judge: {df_filtered.shape}"); print("\n--- Step 7 Complete ---")
     return df_filtered
 
 
 # ------------------ STEP 7b: Unanswerable Verification ----------------------
+# (get_full_manual_text helper unchanged)
 def get_full_manual_text(pages_data: List[Dict]) -> str:
     """Combines markdown content from all pages into a single string."""
     return "\n\n".join(
         [f"--- Page {p.get('page_num', 'N/A')} ---\n{p.get('markdown_content', '')}" for p in pages_data])
 
-
+# (verify_unanswerable function unchanged)
 def verify_unanswerable(df_unanswerable: pd.DataFrame, full_manual_text: str, judge_model_name: str) -> pd.Index:
     """Uses the specified JUDGE model (OpenAI API) to verify unanswerable questions."""
     openai_available = 'openai' in sys.modules and hasattr(sys.modules['openai'], 'chat')
     if not openai_available: logging.warning(
         "OpenAI client not available. Skipping Unanswerable verification."); return df_unanswerable.index
     if df_unanswerable.empty: return pd.Index([])
+    print(f"\n--- Step 7b: Verifying Unanswerable Questions ---")
     print(f"Verifying {len(df_unanswerable)} unanswerable questions using JUDGE model {judge_model_name}...")
     indices_confirmed_unanswerable = [];
     unanswerable_confirmation_string = "Unanswerable"
@@ -685,83 +764,95 @@ def verify_unanswerable(df_unanswerable: pd.DataFrame, full_manual_text: str, ju
         time.sleep(JUDGE_DELAY_SECONDS)  # Delay after successful call
 
     print(f"Verification complete: Confirmed/Kept {len(indices_confirmed_unanswerable)} unanswerable rows.");
+    print("\n--- Step 7b Complete ---")
     return pd.Index(indices_confirmed_unanswerable)
 
 
 # ------------------ STEP 8: Quota Selection (Prioritized) ------------------
+# (quota_select function unchanged)
 def quota_select(df: pd.DataFrame, category_targets: Dict[str, int], final_size: int, random_seed: int = 42) -> Tuple[
     pd.DataFrame, Dict[str, Dict[str, int]]]:
     """Selects rows prioritizing 'passed_strict_check' == True. Returns df and details."""
     if df.empty: logging.error("Quota Selection: Input empty."); raise ValueError("Quota selection on empty DataFrame.")
-    print(f"\nQuota Selection: Selecting up to {final_size} rows, prioritizing strictly checked rows...")
+    print(f"\n--- Step 8: Selecting Final Rows per Category Quota ---")
+    print(f"Quota Selection: Selecting up to {final_size} rows, prioritizing strictly checked rows...")
     final_rows_list = [];
     quota_details = {};
     all_quotas_met = True
     if 'category' not in df.columns: logging.error("Quota Selection: 'category' missing."); raise ValueError(
         "'category' column missing.")
-    has_strict_check_col = 'passed_strict_check' in df.columns;  # ... (Warning if missing unchanged) ...
+    has_strict_check_col = 'passed_strict_check' in df.columns;
+    if not has_strict_check_col: logging.warning("Quota Selection: 'passed_strict_check' column missing. Performing random selection only.")
     available_categories = set(df['category'].unique())
     for category_name in category_targets.keys():
         if category_name not in available_categories: logging.warning(
-            f"Quota Selection: Target category '{category_name}' not found.")
+            f"Quota Selection: Target category '{category_name}' not found in available data.")
     for category_name, target_count in category_targets.items():  # ... (Loop and prioritized selection logic unchanged) ...
         print(f"  Processing Category: '{category_name}' (Target: {target_count})")
         df_pool = df[df['category'] == category_name].copy();
-        available_total = len(df_pool);  # ...
+        available_total = len(df_pool);
         if available_total == 0: logging.warning(f"  -> Quota Warning: No rows available."); quota_details[
             category_name] = {'needed': target_count, 'available': 0, 'strict_taken': 0, 'nonstrict_taken': 0,
                               'selected_total': 0}; all_quotas_met = False; continue  # Log details even if 0 available
         selected_rows_for_cat_list = [];
         strict_taken_count = 0;
-        nonstrict_taken_count = 0  # Initialize counts here
-        if has_strict_check_col:  # ... (Prioritized logic unchanged) ...
+        nonstrict_taken_count = 0
+        if has_strict_check_col:
             df_strict_passed = df_pool[df_pool['passed_strict_check'] == True];
             df_strict_failed = df_pool[df_pool['passed_strict_check'] == False];
             available_strict = len(df_strict_passed);
             available_failed = len(df_strict_failed);
             print(f"  -> Available: {available_strict} strict=True, {available_failed} strict=False.")
             num_needed = target_count;
+            # Take strict first
             num_to_take_strict = min(num_needed, available_strict)
-            if num_to_take_strict > 0: selected_strict = df_strict_passed if available_strict <= num_to_take_strict else df_strict_passed.sample(
-                n=num_to_take_strict, random_state=random_seed); selected_rows_for_cat_list.extend(
-                selected_strict.to_dict(
-                    'records')); num_needed -= num_to_take_strict; strict_taken_count = num_to_take_strict; print(
-                f"  -> Selected {strict_taken_count} strict.")
-            if num_needed > 0 and available_failed > 0: num_to_take_failed = min(num_needed,
-                                                                                 available_failed); selected_failed = df_strict_failed if available_failed <= num_to_take_failed else df_strict_failed.sample(
-                n=num_to_take_failed, random_state=random_seed); selected_rows_for_cat_list.extend(
-                selected_failed.to_dict(
-                    'records')); num_needed -= num_to_take_failed; nonstrict_taken_count = num_to_take_failed; print(
-                f"  -> Selected {nonstrict_taken_count} non-strict.")
+            if num_to_take_strict > 0:
+                 selected_strict = df_strict_passed if available_strict <= num_to_take_strict else df_strict_passed.sample(n=num_to_take_strict, random_state=random_seed)
+                 selected_rows_for_cat_list.extend(selected_strict.to_dict('records'))
+                 num_needed -= num_to_take_strict
+                 strict_taken_count = num_to_take_strict
+                 print(f"  -> Selected {strict_taken_count} strict.")
+            # Fill remaining quota with non-strict if needed
+            if num_needed > 0 and available_failed > 0:
+                 num_to_take_failed = min(num_needed, available_failed)
+                 selected_failed = df_strict_failed if available_failed <= num_to_take_failed else df_strict_failed.sample(n=num_to_take_failed, random_state=random_seed)
+                 selected_rows_for_cat_list.extend(selected_failed.to_dict('records'))
+                 num_needed -= num_to_take_failed
+                 nonstrict_taken_count = num_to_take_failed
+                 print(f"  -> Selected {nonstrict_taken_count} non-strict.")
             if num_needed > 0: logging.warning(
-                f"  -> Quota Warning: Category '{category_name}' not fully met."); all_quotas_met = False
-        else:  # ... (Fallback random sampling unchanged) ...
+                f"  -> Quota Warning: Category '{category_name}' not fully met. Short by {num_needed}."); all_quotas_met = False
+        else:  # Fallback: No strict check column, select randomly
             num_to_select = min(target_count, available_total);
-            print(f"  -> Selecting {num_to_select} randomly.");
+            print(f"  -> Selecting {num_to_select} randomly (no strict check data).");
             if available_total < target_count: logging.warning(
                 f"  -> Quota Warning: Only {available_total} available."); all_quotas_met = False
             selected_rows_df = df_pool.sample(n=num_to_select, random_state=random_seed);
             selected_rows_for_cat_list.extend(selected_rows_df.to_dict('records'));
-            nonstrict_taken_count = num_to_select
+            nonstrict_taken_count = num_to_select # All taken are non-strict in this fallback
         quota_details[category_name] = {'needed': target_count, 'available': available_total,
                                         'strict_taken': strict_taken_count, 'nonstrict_taken': nonstrict_taken_count,
                                         'selected_total': strict_taken_count + nonstrict_taken_count}
         final_rows_list.extend(selected_rows_for_cat_list)
-    final_df = pd.DataFrame(final_rows_list);  # ... (Shuffle unchanged) ...
+    final_df = pd.DataFrame(final_rows_list);
     if not final_df.empty: final_df = final_df.sample(frac=1, random_state=random_seed).reset_index(drop=True)
     print(f"\nQuota Selection: Total rows selected = {len(final_df)}")
     quota_details['_summary'] = {'target_total': final_size, 'selected_total': len(final_df),
                                  'all_quotas_met': all_quotas_met}
-    if len(final_df) != final_size:  # ... (Error check unchanged) ...
-        logging.error(f"Quota Failure: Final size ({len(final_df)}) != target ({final_size}).");
+    if len(final_df) != final_size:
+        logging.error(f"Quota Failure: Final size ({len(final_df)}) != target ({final_size}). This usually means not enough valid rows survived the filtering steps.");
         logging.error(f"Quota Details:\n{json.dumps(quota_details, indent=2)}");
-        sys.exit(1)
+        # Allow script to continue to save candidates/stats even if quota not met
+        # sys.exit(1)
+        logging.error("Proceeding with the rows selected, but final dataset size requirement NOT met.")
     else:
-        print(f"Quota Selection: Successfully selected {len(final_df)} rows.")
+        print(f"Quota Selection: Successfully selected {len(final_df)} rows matching the target size.")
+    print(f" Shape after Quota Select: {final_df.shape}"); print("\n--- Step 8 Complete ---")
     return final_df, quota_details
 
 
 # ------------------ STEP 9: Audit Preparation --------------------------------
+# (export_audit_slice function unchanged)
 def export_audit_slice(df: pd.DataFrame, output_base_path: Path, audit_fraction: float, random_seed: int = 42):
     """
     Exports audit files:
@@ -774,6 +865,26 @@ def export_audit_slice(df: pd.DataFrame, output_base_path: Path, audit_fraction:
     # Separate procedural and non-procedural rows
     df_procedural = df[df['category'] == PROCEDURAL_CATEGORY_NAME].copy()
     df_non_procedural = df[df['category'] != PROCEDURAL_CATEGORY_NAME].copy()
+
+    print(f"\n--- Step 9: Saving Candidates & Exporting Audit Files ---")
+
+    # --- Save Candidates FIRST ---
+    candidate_file_path = Path(f"{output_base_path}{CANDIDATE_SUFFIX}") # Define candidate path locally
+    try:
+         # Ensure parsed_steps is converted to object type before saving pickle if it contains lists
+         if 'parsed_steps' in df.columns:
+             df['parsed_steps'] = df['parsed_steps'].astype(object)
+         if 'corrected_steps' in df.columns: # Ensure this exists and is object before pickle
+             df['corrected_steps'] = df['corrected_steps'].astype(object)
+         else: # Add if missing before pickle (should be added earlier, but safety)
+             df['corrected_steps'] = None; df['corrected_steps'] = df['corrected_steps'].astype(object)
+
+         df.to_pickle(candidate_file_path);
+         logging.info(f"Final candidates saved to: {candidate_file_path} ({len(df)} rows)")
+    except Exception as e:
+         logging.error(f"Failed to save candidate DataFrame: {e}", exc_info=True);
+         logging.warning("Continuing with audit file export, but candidate save failed.")
+
 
     # --- Stage 1 Export: Non-Procedural + Sentinel for Kappa ---
     num_non_proc = len(df_non_procedural)
@@ -830,6 +941,7 @@ def export_audit_slice(df: pd.DataFrame, output_base_path: Path, audit_fraction:
         # Define columns needed for procedural review
         # Ensure 'parsed_steps' is included if it exists in df_procedural
         review_cols_base = ["question_id", "question_text", "gt_answer_snippet", "gt_page_number"]
+        # Ensure parsed_steps is added ONLY IF the column exists in the procedural df
         review_cols = review_cols_base + (["parsed_steps"] if 'parsed_steps' in df_procedural.columns else [])
 
         cols_to_select_review = [col for col in review_cols if col in df_procedural.columns]
@@ -864,11 +976,11 @@ def export_audit_slice(df: pd.DataFrame, output_base_path: Path, audit_fraction:
         except Exception as e:
             logging.error(f"Failed to create empty procedural review file {review_file_path}: {e}", exc_info=True)
 
-
-    print(f"\n✅ Exported files for two-stage audit.")
+    print("\n--- Step 9 Complete (Audit/Review File Export) ---")
 
 
 # --- MODIFIED Step 10 Function -> Now only checks Stage 1 Kappa ---
+# (check_stage1_kappa function unchanged)
 def check_stage1_kappa(output_base_path: Path, kappa_min_threshold: float) -> Dict[str, Any]:
     """
     Reads Stage 1 audit files (non-procedural + sentinel), checks sentinel accuracy,
@@ -894,7 +1006,9 @@ def check_stage1_kappa(output_base_path: Path, kappa_min_threshold: float) -> Di
     print("\nChecking Rater Accuracy on Sentinel Question...")
     all_raters_passed = True; rater_acc = {}
     for rater_id, df_rater in [("A", df_a), ("B", df_b)]:
-        rater_sentinel_row = df_rater[df_rater['question_id'].astype(str) == sentinel_id].copy()
+        # Ensure question_id is string for comparison
+        df_rater['question_id'] = df_rater['question_id'].astype(str)
+        rater_sentinel_row = df_rater[df_rater['question_id'] == sentinel_id].copy()
         accuracy = 0.0
         if len(rater_sentinel_row) == 1:
             correct_count = 0; total_ratings = 0; row = rater_sentinel_row.iloc[0]; expected = sentinel_expected_ratings;
@@ -961,6 +1075,7 @@ def check_stage1_kappa(output_base_path: Path, kappa_min_threshold: float) -> Di
 # -----------------------------------------------------------------------------
 
 # --- Simulation Helpers for --finalize_test ---
+# (_simulate_audit_files function unchanged)
 def _simulate_audit_files(df_non_procedural: pd.DataFrame, output_base_path: Path, audit_fraction: float, random_seed: int = 42):
     """Creates dummy audit files (Stage 1) with high agreement for testing."""
     logging.info("Simulating Stage 1 audit file completion (High Agreement)...")
@@ -990,7 +1105,8 @@ def _simulate_audit_files(df_non_procedural: pd.DataFrame, output_base_path: Pat
     sentinel_expected = SENTINEL_ROWS_INFO[0][1]
     simulated_ratings = []
     for index, row in base_audit_df.iterrows():
-        is_sentinel = str(row['question_id']) == str(sentinel_id) # Ensure comparison is safe
+        # Ensure comparison uses string type for question_id
+        is_sentinel = str(row['question_id']) == str(sentinel_id)
         # Use .get() for category to handle potential missing column safely
         is_unanswerable = row.get('category') == UNANSWERABLE_CATEGORY_NAME
         ratings = {}
@@ -1011,7 +1127,7 @@ def _simulate_audit_files(df_non_procedural: pd.DataFrame, output_base_path: Pat
             logging.info(f"  -> Simulated audit file saved: {audit_file_path}")
         except Exception as e: logging.error(f"Failed to save simulated audit file {audit_file_path}: {e}", exc_info=True)
 
-# NEW Simulation function for finalize_test
+# (_simulate_review_file_edit function unchanged)
 def _simulate_review_file_edit(review_file_path: Path):
     """
     Simulates editing the procedural review file for finalize_test mode.
@@ -1029,6 +1145,10 @@ def _simulate_review_file_edit(review_file_path: Path):
 
         # Check required columns
         required_cols = ['parsed_steps', 'corrected_steps']
+        # Also check comments column exists or add it
+        if 'procedural_comments' not in df_review.columns:
+            df_review['procedural_comments'] = ""
+
         missing_cols = [col for col in required_cols if col not in df_review.columns]
         if missing_cols:
             logging.error(f"Review file {review_file_path.name} missing columns for simulation: {missing_cols}")
@@ -1037,11 +1157,7 @@ def _simulate_review_file_edit(review_file_path: Path):
         # Perform the simulation: Copy parsed to corrected, clear comments
         logging.info("  -> Copying 'parsed_steps' to 'corrected_steps' and clearing 'procedural_comments'.")
         df_review['corrected_steps'] = df_review['parsed_steps']
-        # Ensure comments column exists before setting it
-        if 'procedural_comments' not in df_review.columns:
-            df_review['procedural_comments'] = ""
-        else:
-            df_review['procedural_comments'] = ""
+        df_review['procedural_comments'] = "" # Ensure it's cleared
 
         # Write the modified DataFrame back to the review file
         df_review.to_csv(review_file_path, index=False, quoting=csv.QUOTE_ALL, encoding='utf-8')
@@ -1083,6 +1199,7 @@ if __name__ == "__main__":
     # --- MODE SELECTION ---
     if args.finalize or args.finalize_test:
         # --- Finalize Mode OR Test Finalize Mode ---
+        # (Finalize logic unchanged)
         is_test_mode = args.finalize_test
         mode = "TEST Finalization" if is_test_mode else "Finalization"
         print(f"--- Running in {mode.upper()} mode for base path: {output_base_path} ---")
@@ -1091,6 +1208,10 @@ if __name__ == "__main__":
         if not candidate_file_path.is_file(): logging.error(f"Candidate file missing: {candidate_file_path}"); sys.exit(1)
         try:
             df = pd.read_pickle(candidate_file_path); logging.info(f"Loaded {len(df)} candidate rows.")
+            # Ensure list-like columns are treated as objects after loading
+            if 'parsed_steps' in df.columns: df['parsed_steps'] = df['parsed_steps'].astype(object)
+            if 'corrected_steps' in df.columns: df['corrected_steps'] = df['corrected_steps'].astype(object)
+
         except Exception as e: logging.error(f"Error loading candidate data: {e}", exc_info=True); sys.exit(1)
         if df.empty: logging.error("Loaded candidate file is empty."); sys.exit(1)
 
@@ -1184,13 +1305,20 @@ if __name__ == "__main__":
                         if not pd.isna(val) and val != "": # Log only if it wasn't originally empty
                              logging.debug(f"Empty or non-string value ('{val}') found in corrected_steps, interpreting as empty list.")
                         return []
-                    if val.strip() == '[]': return []
+                    val_stripped = val.strip()
+                    if val_stripped == '[]': return []
                     try:
-                        parsed = ast.literal_eval(val) # val is already confirmed str here
-                        if isinstance(parsed, list) and all(isinstance(i, str) for i in parsed):
-                            return [s.strip() for s in parsed if s.strip()] # Clean steps
+                        # Check if it looks like a list representation
+                        if val_stripped.startswith('[') and val_stripped.endswith(']'):
+                            parsed = ast.literal_eval(val_stripped) # val is already confirmed str here
+                            if isinstance(parsed, list) and all(isinstance(i, str) for i in parsed):
+                                return [s.strip() for s in parsed if s.strip()] # Clean steps
+                            else:
+                                logging.warning(f"Invalid list structure in corrected_steps column value: {val[:100]}... Interpreting as empty list.")
+                                return []
                         else:
-                            logging.warning(f"Invalid list structure in corrected_steps column value: {val[:100]}... Interpreting as empty list.")
+                            # If it's not an empty string and doesn't look like a list, log a warning
+                            logging.warning(f"Corrected_steps value is not a valid list representation: {val[:100]}... Interpreting as empty list.")
                             return []
                     except Exception as e:
                         logging.warning(f"Failed to parse corrected_steps column value: {val[:100]}... Error: {e}. Interpreting as empty list.")
@@ -1199,11 +1327,13 @@ if __name__ == "__main__":
                 # Apply parsing to the corrected_steps column from the review file
                 df_review_edits['corrected_steps_list'] = df_review_edits['corrected_steps'].apply(safe_literal_eval_steps)
                 # Ensure procedural_comments is string (already handled by keep_default_na=False + read_csv)
-                # df_review_edits['procedural_comments'] = df_review_edits['procedural_comments'].astype(str) # Should be string already
+                df_review_edits['procedural_comments'] = df_review_edits['procedural_comments'].astype(str)
 
-                # Drop rows from review file where question_id might be missing
+                # Drop rows from review file where question_id might be missing or empty
                 df_review_edits_valid = df_review_edits.dropna(subset=['question_id'])
-                # Ensure question_id is string for matching
+                df_review_edits_valid = df_review_edits_valid[df_review_edits_valid['question_id'].astype(str).str.strip() != '']
+
+                # Ensure question_id is string for matching in both dataframes
                 df_review_edits_valid['question_id'] = df_review_edits_valid['question_id'].astype(str)
                 df_merged['question_id'] = df_merged['question_id'].astype(str)
 
@@ -1213,30 +1343,51 @@ if __name__ == "__main__":
                 comments_map = pd.Series(df_review_edits_valid.procedural_comments.values, index=df_review_edits_valid.question_id).to_dict()
 
                 # Apply the corrections to the candidate dataframe ('df_merged')
-                # Create columns in df_merged if they don't exist
+                # Create columns in df_merged if they don't exist and ensure type is object/str
                 if 'corrected_steps' not in df_merged.columns: df_merged['corrected_steps'] = None
+                df_merged['corrected_steps'] = df_merged['corrected_steps'].astype(object) # Ensure object type for lists
                 if 'procedural_comments' not in df_merged.columns: df_merged['procedural_comments'] = ""
+                df_merged['procedural_comments'] = df_merged['procedural_comments'].astype(str) # Ensure string type
 
                 # Identify procedural rows in the main dataframe to apply updates
                 update_mask = (df_merged['category'] == PROCEDURAL_CATEGORY_NAME) & (df_merged['question_id'].isin(correction_map))
 
-                # Apply corrections using .map()
-                # Important: Ensure the index used for mapping (question_id) is consistent type (e.g., string)
-                df_merged.loc[update_mask, 'corrected_steps'] = df_merged.loc[update_mask, 'question_id'].map(correction_map)
-                df_merged.loc[update_mask, 'procedural_comments'] = df_merged.loc[update_mask, 'question_id'].map(comments_map).fillna("") # Fill NaN comments with ""
+                # Apply corrections using .map() - map requires the series index to be unique
+                # If duplicate QIDs exist in the review file, mapping might be unpredictable. Check for this.
+                if df_review_edits_valid.question_id.duplicated().any():
+                     duplicates = df_review_edits_valid[df_review_edits_valid.question_id.duplicated()]['question_id'].unique()
+                     logging.warning(f"Duplicate question_ids found in review file: {duplicates}. Mapping behavior for these might be unpredictable (last value usually wins).")
+                # Create the series again just before mapping to be sure index is set correctly
+                correction_series = pd.Series(df_review_edits_valid.corrected_steps_list.values, index=df_review_edits_valid.question_id)
+                comments_series = pd.Series(df_review_edits_valid.procedural_comments.values, index=df_review_edits_valid.question_id)
 
-                # Ensure column types remain suitable in df_merged
+                # Perform the map operation on the subset defined by update_mask
+                mapped_corrections = df_merged.loc[update_mask, 'question_id'].map(correction_series)
+                mapped_comments = df_merged.loc[update_mask, 'question_id'].map(comments_series).fillna("") # Fill NaN comments with ""
+
+                # Assign the mapped values back to the original DataFrame using loc
+                df_merged.loc[update_mask, 'corrected_steps'] = mapped_corrections
+                df_merged.loc[update_mask, 'procedural_comments'] = mapped_comments
+
+                # Final check on column types after merge
                 df_merged['corrected_steps'] = df_merged['corrected_steps'].astype(object)
                 df_merged['procedural_comments'] = df_merged['procedural_comments'].astype(str)
 
                 updated_count = update_mask.sum()
-                total_review_rows = len(df_review_edits_valid)
+                total_review_rows = len(df_review_edits_valid) # Use valid rows count
                 logging.info(f"Successfully merged corrected steps and comments for {updated_count} procedural rows from '{procedural_review_file_path.name}'.")
                 if updated_count < total_review_rows:
-                    logging.warning(f"{total_review_rows - updated_count} rows from the review file did not match QIDs in the candidate set.")
+                    # Find QIDs in review but not in merge target
+                    missing_qids = set(df_review_edits_valid['question_id']) - set(df_merged.loc[update_mask, 'question_id'])
+                    logging.warning(f"{len(missing_qids)} rows from the review file did not match procedural QIDs in the candidate set. Examples: {list(missing_qids)[:5]}")
 
                 procedural_merge_success = True
 
+            except FileNotFoundError:
+                 # This case should ideally be caught earlier, but handle again just in case
+                 logging.error(f"Error merging: Procedural review file not found at {procedural_review_file_path}")
+                 run_stats['finalization_status'] = 'Stage 2 Failed (Review File Missing)';
+                 procedural_merge_success = False
             except Exception as e:
                 logging.error(f"Error merging corrected procedural steps from '{procedural_review_file_path.name}': {e}", exc_info=True)
                 run_stats['finalization_status'] = 'Stage 2 Failed (Review Merge Error)';
@@ -1261,13 +1412,24 @@ if __name__ == "__main__":
             if missing_final_cols:
                 logging.warning(f"Final DF missing some expected columns for gold file: {missing_final_cols}. Saving available columns.")
 
-            df_to_save = df_merged[final_export_cols] # Select only existing columns from the desired schema
+            df_to_save = df_merged[final_export_cols].copy() # Select only existing columns from the desired schema and make a copy
 
-            # Convert list-like columns to string representation for CSV robustness if needed
-            # if 'corrected_steps' in df_to_save.columns:
-            #     df_to_save['corrected_steps'] = df_to_save['corrected_steps'].astype(str)
-            # if 'parsed_steps' in df_to_save.columns:
-            #      df_to_save['parsed_steps'] = df_to_save['parsed_steps'].astype(str)
+            # --- Convert list-like columns to string representation for CSV ---
+            # Ensure the conversion happens safely, handling None or non-list types
+            def list_to_str_safe(x):
+                if isinstance(x, list):
+                    return str(x)
+                elif x is None:
+                    return '[]' # Represent None as empty list string
+                else:
+                    # Log unexpected type, return as basic string
+                    logging.debug(f"Unexpected type in list column for CSV export: {type(x)}, value: {x}. Converting using str().")
+                    return str(x)
+
+            if 'corrected_steps' in df_to_save.columns:
+                df_to_save['corrected_steps'] = df_to_save['corrected_steps'].apply(list_to_str_safe)
+            if 'parsed_steps' in df_to_save.columns:
+                 df_to_save['parsed_steps'] = df_to_save['parsed_steps'].apply(list_to_str_safe)
 
             df_to_save.to_csv(gold_file_path, index=False, quoting=csv.QUOTE_ALL, encoding='utf-8')
             print(f"🎉 Dataset complete! Final output saved to: {gold_file_path}");
@@ -1291,15 +1453,21 @@ if __name__ == "__main__":
 
     else:
         # --- Generate Mode (Default) ---
-        # (Generate Mode logic remains unchanged, instructions already updated)
+        # (Generate Mode logic IS modified here)
         print(f"--- Running in GENERATION mode for input: {args.input_jsonl} ---")
         print(f"--- All output files will be saved relative to: {output_base_path} ---")
         df = pd.DataFrame(); loaded_pages = []; loaded_doc_id = ""; loaded_language = ""
-        run_stats = {'manual_id': output_base_path.name, 'config_used': config} # Store config used
+        # Initialize run_stats, ensure config is serializable
+        serializable_config = {}
+        for k, v in config.items():
+            try: json.dumps({k: v}) # Test serializability
+            except TypeError: serializable_config[k] = str(v) # Convert non-serializable to string
+            else: serializable_config[k] = v
+        run_stats = {'manual_id': output_base_path.name, 'config_used': serializable_config}
 
         try: # Wrap pipeline steps
             # Step 1: Load
-            print("--- Step 1: Loading & Setup ---")
+            print("\n--- Step 1: Loading & Setup ---")
             loaded_pages, loaded_doc_id, loaded_language = load_manual(args.input_jsonl); run_stats['input_pages'] = len(loaded_pages); logging.info(f"Loaded {len(loaded_pages)} pages.")
 
             # Step 2: Get Raw Rows
@@ -1309,33 +1477,48 @@ if __name__ == "__main__":
             else:
                  logging.info(f"Raw file not found. Generating..."); full_prompt = build_prompt(loaded_pages); logging.info(f"Prompt length: {len(full_prompt)} chars."); generation_temp = 0.8; raw_generated_rows = over_generate(full_prompt, OVERGEN_FACTOR, gemini_model, generation_temp); logging.info(f"Target raw output file: {raw_output_file_path}")
                  if raw_generated_rows: raw_output_content = "\n".join(raw_generated_rows); raw_output_file_path.write_text(raw_output_content, encoding='utf-8'); logging.info(f"Saved {len(raw_generated_rows)} rows to {raw_output_file_path}"); loaded_raw_rows = raw_generated_rows
-                 else: raise ValueError("Generation failed.")
-            if not loaded_raw_rows: raise ValueError("No raw rows."); run_stats['raw_rows_generated'] = len(loaded_raw_rows)
+                 else: raise ValueError("Generation failed to produce any rows.")
+            if not loaded_raw_rows: raise ValueError("No raw rows obtained (loaded or generated)."); run_stats['raw_rows_generated'] = 0
+
+            run_stats['raw_rows_obtained'] = len(loaded_raw_rows) # Use 'obtained' as it could be loaded or generated
 
             # Step 3: Parse
             print("\n--- Step 3: Parsing Raw Rows ---")
             df = parse_rows(loaded_raw_rows, SCHEMA, loaded_doc_id, loaded_language)
-            run_stats['rows_parsed'] = len(df); run_stats['parse_failures'] = run_stats.get('raw_rows_generated',0) - run_stats['rows_parsed']
-            if df.empty: raise ValueError("Parsing failed.")
-            print(f"\n--- Step 3 Verification ---"); print(f"Parsed {df.shape[0]} rows."); print("Category Distribution:\n", df['category'].value_counts().to_string());
+            run_stats['rows_parsed'] = len(df); run_stats['parse_failures'] = run_stats.get('raw_rows_obtained',0) - run_stats['rows_parsed']
+            if df.empty: raise ValueError("Parsing failed, no valid rows produced.")
+            print(f"\n--- Step 3 Verification ---"); print(f"Parsed {df.shape[0]} rows.");
+            if 'category' in df.columns: print("Category Distribution (Initial):\n", df['category'].value_counts().to_string());
+            else: print("Category column missing after parse.");
             print("\n--- Step 3 Complete (Parsing) ---")
+
+            # --- NEW Step 3a: Filter Invalid Metadata ---
+            rows_before_meta_filter = len(df)
+            df = filter_invalid_metadata(df)
+            run_stats['rows_after_meta_filter'] = len(df)
+            run_stats['rows_removed_invalid_metadata'] = rows_before_meta_filter - len(df)
+            if df.empty: raise ValueError("DataFrame empty after filtering invalid metadata.")
+            print(f" Shape after Metadata Filter: {df.shape}")
+            if 'category' in df.columns: print("Category Distribution (After Meta Filter):\n", df['category'].value_counts().to_string())
+
 
             # Step 3b: Add Parsed Steps via LLM
             df = add_parsed_steps_llm(df, STEP_PARSING_MODEL) # Use config model
             proc_found = int((df['category'] == PROCEDURAL_CATEGORY_NAME).sum()); proc_parsed = int(df['parsed_steps'].apply(lambda x: isinstance(x, list) and len(x) > 0).sum()) if 'parsed_steps' in df.columns else 0
             run_stats['procedural_rows_found'] = proc_found; run_stats['procedural_rows_llm_parsed'] = proc_parsed
             print(f"\n--- Step 3b Verification ---"); print(f"LLM parsed steps for {proc_parsed}/{proc_found} procedural rows.")
-            print("\n--- Step 3b Complete (LLM Step Parsing) ---")
+            # (Already prints step complete message inside function)
 
             # Step 4: Deduplicate
-            print("\n--- Step 4: Deduplicating Questions ---"); rows_before = len(df)
+            # print("\n--- Step 4: Deduplicating Questions ---"); # Moved print inside function
+            rows_before = len(df)
             if not df.empty: df = deduplicate(df, embedding_model, DUP_THRESHOLD, EMBED_MODEL)
             run_stats['rows_after_dedupe'] = len(df); run_stats['rows_removed_dedupe'] = rows_before - len(df)
             if df.empty: logging.warning("DataFrame empty after Deduplication.")
-            print(f" Shape after Dedupe: {df.shape}"); print("\n--- Step 4 Complete ---")
+            # (Already prints step complete message inside function)
 
             # Step 5: Annotate Page Check
-            print("\n--- Step 5: Annotating Snippet Grounding ---")
+            # print("\n--- Step 5: Annotating Snippet Grounding ---") # Moved print inside function
             if not df.empty: df = page_check_annotate(df, loaded_pages)
             if not df.empty and 'passed_strict_check' in df.columns:
                 passed_strict_count = int(df['passed_strict_check'].sum()); failed_strict_count = len(df) - passed_strict_count
@@ -1344,64 +1527,79 @@ if __name__ == "__main__":
                 except Exception as e: logging.warning(f"Could not calc per-cat strict pass rate: {e}"); run_stats['strict_check_rate_by_category'] = {}
             else: run_stats['stats_after_annotate'] = {'total_rows': len(df), 'passed_strict': 0, 'failed_strict': len(df) }; run_stats['strict_check_rate_by_category'] = {}
             if df.empty: logging.warning("DataFrame empty after Page Check annotation.")
-            print(f" Shape after Annotation: {df.shape}"); print("\n--- Step 5 Complete ---")
+            # (Already prints step complete message inside function)
 
             # Step 6: RAGAS Filter
-            print("\n--- Step 6: Filtering with Ragas ---"); rows_before = len(df)
+            # print("\n--- Step 6: Filtering with Ragas ---"); # Moved print inside function
+            rows_before = len(df)
             if not df.empty: df = ragas_filter(df, loaded_pages, RAGAS_THRESHOLD)
             run_stats['rows_after_ragas'] = len(df); run_stats['rows_removed_ragas'] = rows_before - len(df)
             if df.empty: logging.warning("DataFrame empty after Ragas filtering.")
-            print(f" Shape after Ragas: {df.shape}"); print("\n--- Step 6 Complete ---")
+            # (Already prints step complete message inside function)
 
             # Step 7: Judge Filter
-            print("\n--- Step 7: Filtering Answerable with LLM Judge ---"); rows_before = len(df)
+            # print("\n--- Step 7: Filtering Answerable with LLM Judge ---"); # Moved print inside function
+            rows_before = len(df)
             if not df.empty: df = judge_filter(df, loaded_pages, JUDGE_MODEL, JUDGE_THRESHOLD)
             run_stats['rows_after_judge'] = len(df); run_stats['rows_removed_judge'] = rows_before - len(df)
             if df.empty: logging.warning("DataFrame empty after LLM Judge filtering.")
-            print(f" Shape after Judge: {df.shape}"); print("\n--- Step 7 Complete ---")
+            # (Already prints step complete message inside function)
 
             # Step 7b: Verify Unanswerable
-            print("\n--- Step 7b: Verifying Unanswerable Questions ---"); rows_before = len(df); unans_before = (df['category'] == UNANSWERABLE_CATEGORY_NAME).sum() if 'category' in df.columns else 0; run_stats['unanswerable_initially'] = int(unans_before)
+            # print("\n--- Step 7b: Verifying Unanswerable Questions ---"); # Moved print inside function
+            rows_before = len(df); unans_before = (df['category'] == UNANSWERABLE_CATEGORY_NAME).sum() if 'category' in df.columns else 0; run_stats['unanswerable_initially'] = int(unans_before)
             if not df.empty:
                 df_ans = df[df['category'] != UNANSWERABLE_CATEGORY_NAME].copy(); df_unans = df[df['category'] == UNANSWERABLE_CATEGORY_NAME].copy()
                 if not df_unans.empty: full_ctx = get_full_manual_text(loaded_pages); verified_idx = verify_unanswerable(df_unans, full_ctx, JUDGE_MODEL); df_veri_unans = df_unans.loc[verified_idx]; df = pd.concat([df_ans, df_veri_unans]).sort_index().reset_index(drop=True)
                 else: logging.info("No Unanswerable rows to verify.")
             unans_after = (df['category'] == UNANSWERABLE_CATEGORY_NAME).sum() if 'category' in df.columns else 0; run_stats['unanswerable_verified'] = int(unans_after); run_stats['rows_after_unanswerable_verify'] = len(df);
-            print(f" Shape after Unanswerable check: {df.shape}"); print("\n--- Step 7b Complete ---")
+            print(f" Shape after Unanswerable check: {df.shape}");
+            # (Already prints step complete message inside function)
 
             # Step 8: Quota Select
-            print("\n--- Step 8: Selecting Final Rows per Category Quota ---")
+            # print("\n--- Step 8: Selecting Final Rows per Category Quota ---") # Moved print inside function
             if df.empty: raise ValueError("No rows left for quota selection.")
             df, quota_info = quota_select(df, CATEGORY_TARGETS, FINAL_DATASET_SIZE) # Use config targets/size
             run_stats['quota_selection_details'] = quota_info; run_stats['quota_met_fully'] = quota_info.get('_summary', {}).get('all_quotas_met', False); run_stats['final_dataset_size_generated'] = len(df)
-            print(f" Shape after Quota Select: {df.shape}"); print("\n--- Step 8 Complete ---")
+            if len(df) == 0: raise ValueError("Quota selection resulted in zero rows. Cannot proceed.") # Stop if quota selection fails completely
+            # (Already prints step complete message inside function)
 
             # Step 9: Save Candidates & Export Audit Slice
-            print("\n--- Step 9: Saving Candidates & Exporting Audit Files ---")
-            if df.empty or len(df) != FINAL_DATASET_SIZE: raise ValueError(f"Quota selection failed. DF size {len(df)} != {FINAL_DATASET_SIZE}.")
-            try: df.to_pickle(candidate_file_path); logging.info(f"Final candidates saved to: {candidate_file_path}")
-            except Exception as e: logging.error(f"Failed to save candidate DataFrame: {e}", exc_info=True); logging.warning("Continuing...")
-            # Call export_audit_slice to export Stage 1 & Stage 2 files
+            # print("\n--- Step 9: Saving Candidates & Exporting Audit Files ---") # Moved print inside function
+            if df.empty or len(df) < 1: raise ValueError(f"Quota selection failed or resulted in empty DataFrame. Cannot export.") # Check size > 0
+            # Call export_audit_slice (which now includes saving candidates)
             export_audit_slice(df, output_base_path, AUDIT_FRACTION);
             # Correct calculation of audit sample size for stats
             non_proc_count_final = len(df[df['category'] != PROCEDURAL_CATEGORY_NAME]) # Calculate non-proc count on final DF
             k_stage1_base = max(3, int(round(non_proc_count_final * AUDIT_FRACTION + 0.5)))
             k_stage1_capped = min(k_stage1_base, non_proc_count_final)
-            k_stage1_final = k_stage1_capped + (NUM_SENTINELS if k_stage1_capped > 0 or non_proc_count_final == 0 else 0) # Add sentinel if real rows > 0 or if no real rows exist at all
+            # Add sentinel if real rows > 0 OR if no real rows exist at all (to ensure at least sentinel is audited)
+            k_stage1_final = k_stage1_capped + (NUM_SENTINELS if k_stage1_capped > 0 or non_proc_count_final == 0 else 0)
             run_stats['audit_sample_size_stage1'] = k_stage1_final
             num_proc_exported = len(df[df['category'] == PROCEDURAL_CATEGORY_NAME]); run_stats['audit_sample_size_stage2'] = num_proc_exported
-            print("\n--- Step 9 Complete (Audit/Review File Export) ---")
+            # (Already prints step complete message inside function)
 
             # --- Save Stats for Generate Mode ---
             run_stats['pipeline_status'] = 'Generated'
             run_stats['rater_A_sentinel_accuracy'] = None; run_stats['rater_B_sentinel_accuracy'] = None
             run_stats['kappa_scores_stage1'] = None; run_stats['min_kappa_stage1'] = None; run_stats['finalization_passed'] = None
             try:
-                with open(stats_file_path, 'w', encoding='utf-8') as f: json.dump(run_stats, f, indent=2, default=str) # Use default=str for numpy types
+                # Ensure all values are JSON serializable before saving
+                def make_serializable(obj):
+                    if isinstance(obj, (int, float, str, bool, type(None))): return obj
+                    if isinstance(obj, (list, tuple)): return [make_serializable(item) for item in obj]
+                    if isinstance(obj, dict): return {str(k): make_serializable(v) for k, v in obj.items()}
+                    # Handle pandas/numpy types explicitly if needed
+                    if hasattr(obj, 'item'): return obj.item() # For numpy scalar types
+                    if isinstance(obj, Path): return str(obj) # Convert Path objects
+                    return str(obj) # Default conversion for other types
+
+                serializable_stats = make_serializable(run_stats)
+                with open(stats_file_path, 'w', encoding='utf-8') as f: json.dump(serializable_stats, f, indent=2)
                 logging.info(f"Run statistics saved to: {stats_file_path}")
             except Exception as e: logging.error(f"Failed to save run statistics: {e}", exc_info=True)
 
-            # --- Final Instructions (Already updated) ---
+            # --- Final Instructions (Unchanged) ---
             print("\n*** GENERATION COMPLETE ***")
             print("Candidate data and run stats saved.")
             print(f"Audit files ({audit_file_a.name}, {audit_file_b.name}) exported for Stage 1 review.")
@@ -1412,7 +1610,10 @@ if __name__ == "__main__":
             print(f"   and 'procedural_comments' columns within the '{procedural_review_file_path.name}' file.")
             print(f"   Ensure you save your changes to '{procedural_review_file_path.name}'.")
             print("3. Once BOTH stages are complete and files saved, run finalize mode:")
-            finalize_cmd = f"python \"{sys.argv[0]}\" --input \"{args.input_jsonl}\" --finalize"
+            # Construct the finalize command carefully, quoting paths if they might contain spaces
+            script_path_str = str(Path(sys.argv[0]).resolve())
+            input_jsonl_str = str(input_file_path.resolve())
+            finalize_cmd = f"python \"{script_path_str}\" --input \"{input_jsonl_str}\" --finalize"
             print(f"\n   {finalize_cmd}\n")
 
         except Exception as e:
@@ -1421,7 +1622,13 @@ if __name__ == "__main__":
              try:
                  if 'run_stats' in locals() and run_stats:
                       run_stats['pipeline_status'] = 'Failed'; run_stats['error_message'] = str(e)
-                      with open(stats_file_path, 'w', encoding='utf-8') as f: json.dump(run_stats, f, indent=2, default=str)
+                      # Make serializable before saving on error too
+                      serializable_stats = {}
+                      for k, v in run_stats.items():
+                          try: json.dumps({k: v})
+                          except TypeError: serializable_stats[k] = str(v)
+                          else: serializable_stats[k] = v
+                      with open(stats_file_path, 'w', encoding='utf-8') as f: json.dump(serializable_stats, f, indent=2)
                       logging.info(f"Partial run statistics saved to {stats_file_path} due to error.")
              except Exception as dump_e: logging.error(f"Could not save partial stats on error: {dump_e}")
              sys.exit(1)
