@@ -16,10 +16,10 @@ Each JSON line is a page of the manual; all content is in the key
 ###############################################################################
 # 3 INPUT FORMAT (JSONL)
 Each line contains:
-  • `doc_id`    (str)   : filename of the source PDF
-  • `language` (str)   : e.g. "en"
-  • `page_num` (int)   : page number within the PDF
-  • `markdown_content` (str): Markdown extracted from that page (May contain minor formatting artifacts).
+* `doc_id`    (str)   : filename of the source PDF
+* `language` (str)   : e.g. "en"
+*  `page_num` (int)   : page number within the PDF
+* `markdown_content` (str): Markdown extracted from that page (May contain minor formatting artifacts).
 
 ###############################################################################
 # 4 OUTPUT FORMAT — ***RAW CSV ONLY, COMMA DELIMITED***
@@ -32,15 +32,15 @@ COLUMN ORDER (9 columns)
 "question_id","persona","doc_id","language","question_text",
 "category","gt_answer_snippet","gt_page_number","_self_grounded"
 
-• `question_id`     : `<DOCPREFIX>_Q##` (01 – 35). Derive `<DOCPREFIX>` from the `doc_id` by removing the file extension (e.g., 'heat_pump_dryer'). Strive for sequential numbering.
-• `persona`       : one of {**Novice User, Technician, SafetyOfficer**}
-• `doc_id`          : **Copy the consistent `doc_id` value associated with the input manual.**
-• `language`        : **Copy the consistent `language` value associated with the input manual.**
-• `question_text`   : phrased in the chosen persona’s voice
-• `category`        : exactly one label from Section **6**
-• `gt_answer_snippet` : **Character-for-character verbatim copy** from `markdown_content`. Minimal span (≤ 250 chars) that fully answers the question. **For 'Procedural Step Inquiry', the snippet should contain the sequence of steps and may include newlines (`\n`) if steps are listed vertically in the source.** **Do NOT paraphrase or summarise.** ("Not Answered" for Unanswerable items)
-• `gt_page_number` : page_num of the snippet, or "None" for Unanswerable
-• `_self_grounded` : **"True"** if the question is answerable and the snippet is directly extracted, **"False"** if the question is 'Unanswerable'.
+* `question_id`     : `<DOCPREFIX>_Q##` (01 – 35). Derive `<DOCPREFIX>` from the `doc_id` by removing the file extension (e.g., 'heat_pump_dryer'). Strive for sequential numbering.
+* `persona`       : one of {**Novice User, Technician, SafetyOfficer**}
+* `doc_id`          : **Copy the consistent `doc_id` value associated with the input manual.**
+* `language`        : **Copy the consistent `language` value associated with the input manual.**
+* `question_text`   : phrased in the chosen persona’s voice
+* `category`        : exactly one label from Section **6**
+* `gt_answer_snippet` : **Character-for-character verbatim copy** from `markdown_content`. Minimal span (≤ 250 chars) that fully answers the question. **For 'Procedural Step Inquiry', the snippet should contain the sequence of steps and may include newlines (`\n`) if steps are listed vertically in the source.** **Do NOT paraphrase or summarise.** ("Not Answered" for Unanswerable items)
+* `gt_page_number` : page_num of the snippet, or "None" for Unanswerable
+* `_self_grounded` : **"True"** if the question is answerable and the snippet is directly extracted, **"False"** if the question is 'Unanswerable'.
 
 ###############################################################################
 # 5 PERSONA STYLE HINTS  (ONE‑LINE EACH)
@@ -64,15 +64,15 @@ SafetyOfficer → asks about/emphasises risks, warnings, and protective measures
 (Total rows = **35**. **Strict adherence to these counts is crucial.**)
 ###############################################################################
 # 7 GENERATION GUIDELINES
-• **Strict grounding:** Except Unanswerable, every answer *must* be directly extractable, character-for-character, from `markdown_content`.
-• **Interpret Noisy Input:** If `markdown_content` contains minor formatting issues or apparent OCR errors, interpret the intended meaning for question generation, but extract answer snippets *only* from the text as provided.
-• **Procedural Preference:** When generating 'Procedural Step Inquiry' rows, actively search for multi-step procedures. **Make a significant effort to select procedures containing 3 or more distinct steps.** Prioritize those that use standard numerical enumeration (e.g., 1., 2., 3.) and extract them including the numbering. If no such numbered procedures are found for a relevant question, extract the steps as available using the source's formatting.
-• **Page Coverage:** Spread questions across as many pages as possible.
-• **Snippet Minimality:** Choose the *shortest* contiguous span that fully answers. For procedures, this includes the full sequence of core steps for the specific sub-task identified.
-• **Persona Balance:** Distribute the personas (`Novice User`, `Technician`, `SafetyOfficer`) thoughtfully. Aim for a reasonable balance, avoiding significant overuse of one persona.
-• **Question Diversity:** Avoid generating semantically very similar questions, even if they fit the category/persona.
-• **Self-Correction Check:** Before outputting, mentally review your generated rows. Ensure each has exactly 9 columns, follows the CSV quoting rules, and that values align with definitions (e.g., category labels, snippet rules, `_self_grounded` logic).
-• **Token Budget:** Keep total output < 4000 tokens (estimate).
+* **Strict grounding:** Except Unanswerable, every answer *must* be directly extractable, character-for-character, from `markdown_content`.
+* **Interpret Noisy Input:** If `markdown_content` contains minor formatting issues or apparent OCR errors, interpret the intended meaning for question generation, but extract answer snippets *only* from the text as provided.
+* **Procedural Preference:** When generating 'Procedural Step Inquiry' rows, actively search for multi-step procedures. **Make a significant effort to select procedures containing 3 or more distinct steps.** Prioritize those that use standard numerical enumeration (e.g., 1., 2., 3.) and extract them including the numbering. If no such numbered procedures are found for a relevant question, extract the steps as available using the source's formatting.
+* **Page Coverage:** Spread questions across as many pages as possible.
+* **Snippet Minimality:** Choose the *shortest* contiguous span that fully answers. For procedures, this includes the full sequence of core steps for the specific sub-task identified.
+* **Persona Balance:** Distribute the personas (`Novice User`, `Technician`, `SafetyOfficer`) thoughtfully. Aim for a reasonable balance, avoiding significant overuse of one persona.
+* **Question Diversity:** Avoid generating semantically very similar questions, even if they fit the category/persona.
+* **Self-Correction Check:** Before outputting, mentally review your generated rows. Ensure each has exactly 9 columns, follows the CSV quoting rules, and that values align with definitions (e.g., category labels, snippet rules, `_self_grounded` logic).
+* **Token Budget:** Keep total output < 4000 tokens (estimate).
 
 ###############################################################################
 # 8 EXAMPLE ROWS  (not part of output)
@@ -98,5 +98,10 @@ SafetyOfficer → asks about/emphasises risks, warnings, and protective measures
 <PASTE ALL JSONL LINES FOR THIS MANUAL HERE>
 ###############################################################################
 
-### **CRITICAL REMINDER:** OUTPUT ONLY the 35 raw CSV rows NOW. ###
-### NO extra text, headers, explanations, or formatting. ###
+
+### **CRITICAL REMINDER AND FINAL INSTRUCTION:** ###
+YOUR *ONLY* RESPONSE MUST BE THE 35 RAW CSV ROWS.
+START *IMMEDIATELY* WITH THE FIRST CHARACTER OF THE FIRST CSV ROW (A DOUBLE QUOTE).
+END *IMMEDIATELY* WITH THE LAST CHARACTER OF THE LAST CSV ROW (A DOUBLE QUOTE FOLLOWED BY A NEWLINE).
+DO NOT INCLUDE *ANY* INTRODUCTORY TEXT, EXPLANATIONS, SUMMARIES, HEADER ROWS, OR ANY OTHER TEXT WHATSOEVER.
+PRODUCE THE 35 CSV ROWS NOW.

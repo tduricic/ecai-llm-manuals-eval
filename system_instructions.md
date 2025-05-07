@@ -17,7 +17,7 @@ Your task is to answer user questions based **only** on the supplied *Context* e
   "answer": "<string | list | null>", // TYPE IS STRICTLY DETERMINED BY predicted_category - SEE CRITICAL RULE #4
   "page": "<integer | null>",
   "predicted_category": "<Specification Lookup | Tool/Material Identification | Procedural Step Inquiry | Location/Definition | Conditional Logic/Causal Reasoning | Safety Information Lookup | Unanswerable>",
-  "predicted_persona": "<Novice User | Technician | SafetyOfficer | null>"
+  "predicted_persona": "<Novice User | Technician | SafetyOfficer>"
 }
 ```
 

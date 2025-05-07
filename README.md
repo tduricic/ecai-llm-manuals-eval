@@ -28,4 +28,17 @@ The primary goal is to develop and apply a comprehensive evaluation framework to
 
 ## TODO
 
+Manuals:
+
+[NanoDrop One](https://tools.thermofisher.com/content/sfs/manuals/3091-NanoDrop-One-Help-UG-en.pdf)
+[Omron Monitor](https://medaval.ie/docs/manuals/Omron-HEM-7200-E-Manual.pdf)
+[Miele G5000e](https://media.miele.com/downloads/54/42/00_F61547C6F7151EDDB0FCF677A67E5442.pdf)
+[DeWalt Saw](https://www.dewalt.com/GLOBALBOM/QU/DWE575/1/Instruction_Manual/EN/NA477368_DWE574_DWE575_DWE575SB_T1__NA.pdf)
+[Bosch Oven](https://media3.bosch-home.com/Documents/9001011473_B.pdf)
+[Dyson v12](https://www.dyson.co.uk/content/dam/dyson/maintenance/user-guides/en-vn/DYS_P211757_J0004_T01_Dyson_620D_TH_VN_ID_user_guide_W210XH297_EN-VN_Digital.pdf)
+[Prusa 3d printer](https://www.prusa3d.com/downloads/manual/prusa3d_manual_mk4s_en_1_0.pdf)
+[Makita drill](https://cdn.makitatools.com/apps/cms/doc/prod/XFD/e2dc6a61-63d3-4455-b4dc-940ffa84e99d_XFD12_IM_885510-943.pdf)
+[Hilti Hammer](https://www.hilti.com/medias/sys_master/documents/h76/ha2/10131929923614/Operating-Instruction-TE-60-04-Operating-Instruction-PUB-5277961-000.pdf)
+[]()
+
 (High-level tasks remaining.)
